@@ -3,6 +3,7 @@ import json
 import boto3
 import requests
 from datetime import datetime, timezone
+from snowflake_provider import Provider
 
 
 def s3_client(json_data, timestamp):
@@ -22,11 +23,28 @@ def s3_client(json_data, timestamp):
     s3.put_object(Bucket=s3_bucket_name, Key=s3_key, Body=json_data)
 
 
-def fetch_exchange_rates_to_s3():
+def load_to_snowflake(json_data, timestamp):
     '''
-    Stage 1 (Snowflake skipped):
+    Calling stored procedure to load data into Snowflake.
+    '''
+    provider = Provider(
+        region_name=os.environ.get('region_name'),
+        aws_db_creds_secret_id='db/currency-exchange-rate',
+        aws_db_creds_secret_value='fusion_snowflake',
+        snowflake_db=os.environ.get('snowflake_db'),
+        snowflake_role=os.environ.get('snowflake_role'),
+        snowflake_wh=os.environ.get('snowflake_wh'),
+    )
+
+    sql = "CALL CURRENCY.SP_EXCHANGE_RATE_LOADING(%s, %s)"
+    provider.exe_query(sql, (json_data, timestamp))
+
+
+def fetch_exchange_rates():
+    '''
     1. Getting data from API.
-    2. Calling s3_client function to dump data into S3
+    2. Dumping raw JSON into S3.
+    3. Loading data into Snowflake.
     '''
     base_url = os.environ.get("oer_base_url")
     app_id = os.environ.get("oer_app_id")
@@ -39,12 +57,15 @@ def fetch_exchange_rates_to_s3():
     if response.status_code == 200:
         data = response.json()
         timestamp = datetime.fromtimestamp(data['timestamp'], tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-        s3_client(json.dumps(data), timestamp)
+        json_data = json.dumps(data)
+
+        s3_client(json_data, timestamp)
+        load_to_snowflake(json_data, timestamp)
     else:
         raise Exception(f"API request failed with status code {response.status_code}")
 
 
 def lambda_handler(event, context):
-    fetch_exchange_rates_to_s3()
+    fetch_exchange_rates()
 
     return {'statusCode': 200}
